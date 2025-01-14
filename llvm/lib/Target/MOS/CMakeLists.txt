@@ -21,24 +21,25 @@ add_public_tablegen_target(MOSCommonTableGen)
 
 add_llvm_target(MOSCodeGen
   MOSAsmPrinter.cpp
+  MOSCallGraphUtils.cpp
   MOSCallLowering.cpp
   MOSCallingConv.cpp
   MOSCombiner.cpp
   MOSCopyOpt.cpp
-  MOSInstrCost.cpp
   MOSFrameLowering.cpp
   MOSISelLowering.cpp
+  MOSIncDecPhi.cpp
   MOSIndexIV.cpp
   MOSInlineAsmLowering.cpp
-  MOSIncDecPhi.cpp
   MOSInsertCopies.cpp
+  MOSInstrCost.cpp
   MOSInstrInfo.cpp
   MOSInstructionSelector.cpp
+  MOSInternalize.cpp
   MOSLateOptimization.cpp
   MOSLegalizerInfo.cpp
   MOSLowerSelect.cpp
   MOSMCInstLower.cpp
-  MOSMachineFunctionInfo.cpp
   MOSMachineScheduler.cpp
   MOSNonReentrant.cpp
   MOSPostRAScavenging.cpp

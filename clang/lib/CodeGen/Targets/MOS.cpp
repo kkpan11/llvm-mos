@@ -32,8 +32,8 @@ public:
       I.info = classifyArgumentType(I.type);
   }
 
-  Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
-                    QualType Ty) const override;
+  RValue EmitVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
+                   AggValueSlot Slot) const override;
 };
 
 class MOSTargetCodeGenInfo : public TargetCodeGenInfo {
@@ -70,6 +70,10 @@ ABIArgInfo MOSABIInfo::classifyArgumentType(QualType Ty) const {
     if (getRecordArgABI(Ty, getCXXABI()) == CGCXXABI::RAA_DirectInMemory ||
         getContext().getTypeSize(Ty) > 32)
       return getNaturalAlignIndirect(Ty, false);
+
+    if (isEmptyRecord(getContext(), Ty, true))
+      return ABIArgInfo::getIgnore();
+
     return ABIArgInfo::getDirect();
   }
   return DefaultABIInfo::classifyArgumentType(Ty);
@@ -78,6 +82,9 @@ ABIArgInfo MOSABIInfo::classifyArgumentType(QualType Ty) const {
 ABIArgInfo MOSABIInfo::classifyReturnType(QualType RetTy) const {
   // Large records should not be passed by value.
   if (isAggregateTypeForABI(RetTy)) {
+    if (isEmptyRecord(getContext(), RetTy, true))
+      return ABIArgInfo::getIgnore();
+
     return getContext().getTypeSize(RetTy) > 32
                ? getNaturalAlignIndirect(RetTy, false)
                : ABIArgInfo::getDirect();
@@ -85,13 +92,13 @@ ABIArgInfo MOSABIInfo::classifyReturnType(QualType RetTy) const {
   return DefaultABIInfo::classifyReturnType(RetTy);
 }
 
-Address MOSABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
-                              QualType Ty) const {
+RValue MOSABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
+                             QualType Ty, AggValueSlot Slot) const {
   ABIArgInfo ArgInfo = classifyArgumentType(Ty);
   return emitVoidPtrVAArg(CGF, VAListAddr, Ty, ArgInfo.isIndirect(),
                           getContext().getTypeInfoInChars(Ty),
                           /*SlotSize=*/CharUnits::One(),
-                          /*AllowHigherAlign=*/true);
+                          /*AllowHigherAlign=*/true, Slot);
 }
 
 std::unique_ptr<TargetCodeGenInfo>

@@ -2,40 +2,6 @@
 
 LLVM-MOS is a LLVM fork supporting the MOS 65xx series of microprocessors.
 
-```C
-#include <stdio.h>
-
-int main(void) {
-  printf("HELLO, 6502!\n");
-}
-```
-
-```
-main:
-	ldx	#1
-	lda	#72
-.LBB0_1:
-	cmp	#10
-	beq	.LBB0_4
-.LBB0_2:
-	jsr	__CHROUT
-	lda	.Lstr,x
-	inx
-	cpx	#12
-	bne	.LBB0_1
-	lda	#13
-	jsr	__CHROUT
-	ldx	#0
-	txa
-	rts
-.LBB0_4:
-	lda	#13
-	jmp	.LBB0_2
-
-.Lstr:
-	.asciz	"HELLO, 6502!"
-```
-
 For more information about this project, please see
 [llvm-mos.org](https://www.llvm-mos.org).
 
@@ -45,8 +11,6 @@ The llvm-mos project is not officially affiliated with or endorsed by the LLVM
 Foundation or LLVM project. Our project is a fork of LLVM that provides a new
 backend/target; our project is based on LLVM, not a part of LLVM. Our use of
 LLVM or other related trademarks does not imply affiliation or endorsement.
-
-# Getting started
 
 This repository only contains the core llvm-mos utilities, and it doesn't form a
 complete toolchain. Accordingly, there are no official binary releases for this
@@ -143,25 +107,21 @@ CPUs you have.
 current state of the code, and jump in and help us with pull requests for
 bug fixes.
 
-All LLVM-MOS code is expected to *strictly* observe the
-[LLVM coding standards](https://llvm.org/docs/CodingStandards.html).  That means
-your code must have been run through clang-format with the --style set to LLVM,
-and clang-tidy with the LLVM coding conventions with the llvm-\*, modernize-\*,
-and cppcore-\* checks enabled.  If your code does not observe these standards,
-there's a good chance we'll reject it, unless you have a *good reason* for not
-observing these rules.
+All LLVM-MOS code should observe the
+[LLVM coding standards](https://llvm.org/docs/CodingStandards.html).
+`clang-format` and `clang-tidy` are aids for this; this repo contains appropriate
+configuration files for them.
 
-If you add new functionality or an optimization pass to LLVM-MOS, we're
-not going to accept it unless you have modified the associated test suite to
-exercise your new functionality.  Drive-by feature pulls will probably not be
-accepted, unless their new functionality is too trivial to be tested.
-GlobalISel gives you no excuses *not* to write a full test suite for your
-codegen pass or your new functionality.
+Code should be appropriately documented and well tested. We're not quite as picky
+as the upstream LLVM project, but a compiler is too complex a project to thrive
+without a high bar for code quality.
 
-You can submit well-written, carefully researched issue requests via the
+You submit issue requests via the
 [issue tracker](https://github.com/llvm-mos/llvm-mos/issues).  Please note, we
 don't have the bandwidth yet to handle "why dosent my pogrem compil" type
-requests.
+requests; it helps to do at least some legwork to figure out what's going on first.
+Small reproducers are tremendously helpful, and for more finnicky issues, they're
+essentially required.
 
 Additionally, the current state of our documentation at
 https://llvm-mos.org can always use improvements and clarifications.

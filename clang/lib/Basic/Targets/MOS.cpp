@@ -43,12 +43,14 @@ MOSTargetInfo::MOSTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
   AccumScale = 7;
   SuitableAlign = 8;
   DefaultAlignForAttributeAligned = 8;
-  SizeType = UnsignedShort;
-  PtrDiffType = SignedShort;
-  IntPtrType = SignedShort;
+  SizeType = UnsignedInt;
+  PtrDiffType = SignedInt;
+  IntPtrType = SignedInt;
   WCharType = UnsignedLong;
-  WIntType = UnsignedLong;
+  WIntType = SignedLong;
+  Char16Type = UnsignedInt;
   Char32Type = UnsignedLong;
+  Int16Type = SignedInt;
   SigAtomicType = UnsignedChar;
 }
 
@@ -104,6 +106,38 @@ bool MOSTargetInfo::validateOperandSize(const llvm::StringMap<bool> &FeatureMap,
   case 'v':
     return Size <= 8;
   }
+}
+
+llvm::StringRef
+MOSTargetInfo::getConstraintRegister(StringRef Constraint,
+                                     StringRef Expression) const {
+  StringRef::iterator I, E;
+  for (I = Constraint.begin(), E = Constraint.end(); I != E; ++I) {
+    if (isalpha(*I))
+      break;
+  }
+  if (I == E)
+    return "";
+  switch (*I) {
+  case 'a':
+    return "a";
+  case 'x':
+    return "x";
+  case 'y':
+    return "y";
+  case 'c':
+    return "c";
+  case 'v':
+    return "v";
+  case 'd':
+  case 'g':
+  case 'r':
+  case 'R':
+    // This handles any global or local register variables that make this more
+    // explicit.
+    return Expression;
+  }
+  return "";
 }
 
 static const char *const GCCRegNames[] = {
@@ -204,22 +238,24 @@ void MOSTargetInfo::getTargetDefines(const LangOptions &Opts,
   Builder.defineMacro("__SOFTFP__");
 
   // Generate instruction feature set macros.
-  const auto &CPUDefines = llvm::StringSwitch<std::vector<std::string>>(CPUName)
-    .Case("mos6502", {"6502"})
-    .Case("mos6502x", {"6502", "6502x"})
-    .Case("mos65c02", {"6502", "65c02"})
-    .Case("mosr65c02", {"6502", "65c02", "r65c02"})
-    .Case("mosw65c02", {"6502", "65c02", "r65c02", "w65c02"})
-    .Case("mosw65816", {"6502", "65c02", "w65816", "w65c02"})
-    .Case("mos65el02", {"6502", "65c02", "65el02", "w65c02"})
-    .Case("mos65ce02", {"6502", "65c02", "65ce02", "r65c02"})
-    .Case("moshuc6280", {"6502", "65c02", "huc6280", "r65c02"})
-    .Case("mos65dtv02", {"6502", "65dtv02"})
-    .Case("mos4510", {"4510", "6502", "65c02", "65ce02", "r65c02"})
-    .Case("mos45gs02", {"4510", "45gs02", "6502", "65c02", "65ce02", "r65c02"})
-    .Case("mosspc700", {"spc700"})
-    .Default({"6502"});
-  for (const auto &CPUDefine: CPUDefines) {
+  const auto &CPUDefines =
+      llvm::StringSwitch<std::vector<std::string>>(CPUName)
+          .Case("mos6502", {"6502"})
+          .Case("mos6502x", {"6502", "6502x"})
+          .Case("mos65c02", {"6502", "65c02"})
+          .Case("mosr65c02", {"6502", "65c02", "r65c02"})
+          .Case("mosw65c02", {"6502", "65c02", "r65c02", "w65c02"})
+          .Case("mosw65816", {"6502", "65c02", "w65816", "w65c02"})
+          .Case("mos65el02", {"6502", "65c02", "65el02", "w65c02"})
+          .Case("mos65ce02", {"6502", "65c02", "65ce02", "r65c02"})
+          .Case("moshuc6280", {"6502", "65c02", "huc6280", "r65c02"})
+          .Case("mos65dtv02", {"6502", "65dtv02"})
+          .Case("mos4510", {"4510", "6502", "65c02", "65ce02", "r65c02"})
+          .Case("mos45gs02",
+                {"4510", "45gs02", "6502", "65c02", "65ce02", "r65c02"})
+          .Case("mosspc700", {"spc700"})
+          .Default({"6502"});
+  for (const auto &CPUDefine : CPUDefines) {
     Builder.defineMacro("__mos" + CPUDefine + "__");
   }
 

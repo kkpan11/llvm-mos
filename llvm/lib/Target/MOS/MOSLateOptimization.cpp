@@ -18,6 +18,7 @@
 
 #include "MCTargetDesc/MOSMCTargetDesc.h"
 #include "MOS.h"
+#include "MOSInstrBuilder.h"
 #include "MOSRegisterInfo.h"
 #include "MOSSubtarget.h"
 
@@ -44,8 +45,8 @@ public:
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override;
-  bool lowerCMPTermZs(MachineBasicBlock &MBB) const;
-  void lowerCMPTermZ(MachineInstr &MI) const;
+  bool lowerCmpZeros(MachineBasicBlock &MBB) const;
+  void lowerCmpZero(MachineInstr &MI) const;
   bool combineLdImm(MachineBasicBlock &MBB) const;
   bool tailJMP(MachineBasicBlock &MBB) const;
 };
@@ -53,7 +54,7 @@ public:
 bool MOSLateOptimization::runOnMachineFunction(MachineFunction &MF) {
   bool Changed = false;
   for (MachineBasicBlock &MBB : MF) {
-    Changed |= lowerCMPTermZs(MBB);
+    Changed |= lowerCmpZeros(MBB);
     Changed |= combineLdImm(MBB);
     Changed |= tailJMP(MBB);
   }
@@ -63,13 +64,13 @@ bool MOSLateOptimization::runOnMachineFunction(MachineFunction &MF) {
 static bool definesNZ(const MachineInstr &MI, Register Val, const MOSSubtarget &STI) {
   if (MI.getOpcode() == MOS::CL)
     return false;
-  if (STI.hasSPC700() && MI.getOpcode() == MOS::PL_CMOS)
+  if (STI.hasSPC700() && MI.getOpcode() == MOS::PL)
     return false;
   if (MI.getOpcode() == MOS::MOVImag8)
     return false;
   if (MI.getOpcode() == MOS::STImag8)
     return false;
-  if (MI.definesRegister(Val))
+  if (MI.definesRegister(Val, /*TRI=*/nullptr))
     return true;
   switch (MI.getOpcode()) {
   default:
@@ -82,25 +83,25 @@ static bool definesNZ(const MachineInstr &MI, Register Val, const MOSSubtarget &
   }
 }
 
-bool MOSLateOptimization::lowerCMPTermZs(MachineBasicBlock &MBB) const {
+bool MOSLateOptimization::lowerCmpZeros(MachineBasicBlock &MBB) const {
   const auto &MRI = MBB.getParent()->getRegInfo();
   const auto &STI = MBB.getParent()->getSubtarget<MOSSubtarget>();
   const auto *TRI = MRI.getTargetRegisterInfo();
   bool Changed = false;
   for (MachineInstr &MI : make_early_inc_range(mbb_reverse(MBB))) {
-    if (MI.getOpcode() != MOS::CMPTermZ)
+    if (MI.getOpcode() != MOS::CmpZero)
       continue;
-    assert(MI.getOperand(0).isDead());
-    // Dead CMPTermZs may appear as the result of branch manipulation.
+
     if (MI.allDefsAreDead()) {
       MI.eraseFromParent();
-      Changed = true;
       continue;
     }
 
-    Register Val = MI.getOperand(1).getReg();
+    Register Val = MI.getOperand(0).getReg();
 
     for (auto &J : mbb_reverse(MBB.begin(), MI)) {
+      if (J.isDebugInstr())
+        continue;
       if (J.isCall() || J.isInlineAsm())
         break;
       if (definesNZ(J, Val, STI)) {
@@ -123,12 +124,10 @@ bool MOSLateOptimization::lowerCMPTermZs(MachineBasicBlock &MBB) const {
         case MOS::MOVImag8:
         case MOS::STImag8:
         case MOS::PH:
-        case MOS::PH_CMOS:
         case MOS::SWAP:
           ClobbersNZ = false;
           break;
         case MOS::PL:
-        case MOS::PL_CMOS:
           if (STI.hasSPC700())
             ClobbersNZ = false;
           break;
@@ -140,17 +139,17 @@ bool MOSLateOptimization::lowerCMPTermZs(MachineBasicBlock &MBB) const {
       continue;
 
     Changed = true;
-    lowerCMPTermZ(MI);
+    lowerCmpZero(MI);
   }
   return Changed;
 }
 
-void MOSLateOptimization::lowerCMPTermZ(MachineInstr &MI) const {
+void MOSLateOptimization::lowerCmpZero(MachineInstr &MI) const {
   auto &MBB = *MI.getParent();
   const auto &MRI = MBB.getParent()->getRegInfo();
   const auto *TRI = MRI.getTargetRegisterInfo();
   const MOSSubtarget &STI = MBB.getParent()->getSubtarget<MOSSubtarget>();
-  Register Val = MI.getOperand(1).getReg();
+  Register Val = MI.getOperand(0).getReg();
 
   LivePhysRegs PhysRegs;
   PhysRegs.init(*TRI);
@@ -183,16 +182,16 @@ void MOSLateOptimization::lowerCMPTermZ(MachineInstr &MI) const {
         if (J.getOpcode() == MOS::LDImag8 && J.getOperand(1).getReg() == Val &&
             !Defined.contains(J.getOperand(0).getReg())) {
           Register GPR = J.getOperand(0).getReg();
-          MI.getOperand(1).setReg(GPR);
-          lowerCMPTermZ(MI);
+          MI.getOperand(0).setReg(GPR);
+          lowerCmpZero(MI);
           return;
         }
 
         if (J.getOpcode() == MOS::STImag8 && J.getOperand(0).getReg() == Val &&
             !Defined.contains(J.getOperand(1).getReg())) {
           Register GPR = J.getOperand(1).getReg();
-          MI.getOperand(1).setReg(GPR);
-          lowerCMPTermZ(MI);
+          MI.getOperand(0).setReg(GPR);
+          lowerCmpZero(MI);
           return;
         }
 
@@ -210,8 +209,8 @@ void MOSLateOptimization::lowerCMPTermZ(MachineInstr &MI) const {
           break;
       }
 
-      Builder.buildInstr(MOS::INCImag8, {Val}, {Val});
-      Access = Builder.buildInstr(MOS::DECImag8, {Val}, {Val});
+      Builder.buildInstr(MOS::INC, {Val}, {Val});
+      Access = Builder.buildInstr(MOS::DEC, {Val}, {Val});
     }
     Access.addDef(MOS::NZ, RegState::Implicit);
     Access->getOperand(0).setIsDead();
@@ -249,6 +248,9 @@ void MOSLateOptimization::lowerCMPTermZ(MachineInstr &MI) const {
   MI.eraseFromParent();
 }
 
+// Replaces immediate register loads with register transfers
+// and increments/decrements.
+// The resulting code is just as fast, but shorter.
 bool MOSLateOptimization::combineLdImm(MachineBasicBlock &MBB) const {
   const auto &TII = *MBB.getParent()->getSubtarget().getInstrInfo();
   const auto *TRI = MBB.getParent()->getSubtarget().getRegisterInfo();
@@ -257,12 +259,35 @@ bool MOSLateOptimization::combineLdImm(MachineBasicBlock &MBB) const {
   bool Changed = false;
 
   struct ImmLoad {
+    // nullptr means exact register value is unknown.
+    // Otherwise, points to the instruction that recently loaded this register.
     MachineInstr *MI = nullptr;
+    // Current register value.
     int64_t Val;
   } LoadA, LoadX, LoadY;
 
   for (MachineInstr &MI : MBB) {
+    ImmLoad *Load = nullptr;
+    if (MI.getOpcode() == MOS::TA && LoadA.MI) {
+      // We see a TAX or TAY and know the accumulator value.
+      // TODO: handle TXA, TYA, TXY, TYX, maybe INX etc.
+      switch (MI.getOperand(0).getReg()) {
+      case MOS::X:
+        Load = &LoadX;
+        break;
+      case MOS::Y:
+        Load = &LoadY;
+        break;
+      }
+      // Copy A value to X or Y.
+      Load->MI = &MI;
+      Load->Val = LoadA.Val;
+      continue;
+    }
+
     if (MI.getOpcode() != MOS::LDImm || !MI.getOperand(1).isImm()) {
+      // If a register is overwritten with an instruction other than
+      // an immediate load, mark register value as unknown.
       if (MI.modifiesRegister(MOS::A, TRI))
         LoadA.MI = nullptr;
       if (MI.modifiesRegister(MOS::X, TRI))
@@ -272,19 +297,21 @@ bool MOSLateOptimization::combineLdImm(MachineBasicBlock &MBB) const {
       continue;
     }
 
+    // Process LD_ #.
     Register Dst = MI.getOperand(0).getReg();
     int64_t Val = MI.getOperand(1).getImm();
 
-    ImmLoad *Load = nullptr;
     // Try to replace with T__.
     switch (Dst) {
     case MOS::A: {
       Register Src;
       if (LoadX.MI && LoadX.Val == Val) {
+        // LDA #imm -> TXA if X==imm
         Src = MOS::X;
         Load = &LoadX;
       }
       if (LoadY.MI && LoadY.Val == Val) {
+        // LDA #imm -> TYA if Y==imm
         Src = MOS::Y;
         Load = &LoadY;
       }
@@ -297,14 +324,17 @@ bool MOSLateOptimization::combineLdImm(MachineBasicBlock &MBB) const {
     case MOS::X:
     case MOS::Y:
       if (LoadA.MI && LoadA.Val == Val) {
+        // LDX/LDY #imm -> TAX/TAY if A==imm
         Load = &LoadA;
         MI.setDesc(TII.get(MOS::TA));
         MI.getOperand(1).ChangeToRegister(MOS::A, /*isDef=*/false);
       } else if (STI.hasW65816Or65EL02()) {
         if (Dst == MOS::X && LoadY.MI && LoadY.Val == Val) {
+          // LDX #imm -> TYX if Y==imm
           MI.setDesc(TII.get(MOS::TX));
           MI.getOperand(1).ChangeToRegister(MOS::Y, /*isDef=*/false);
         } else if (Dst == MOS::Y && LoadX.MI && LoadX.Val == Val) {
+          // LDY #imm -> TXY if X==imm
           MI.setDesc(TII.get(MOS::TX));
           MI.getOperand(1).ChangeToRegister(MOS::X, /*isDef=*/false);
         }
@@ -318,23 +348,20 @@ bool MOSLateOptimization::combineLdImm(MachineBasicBlock &MBB) const {
       case MOS::A:
         if (STI.hasGPRIncDec())
           if (LoadA.MI && std::abs(LoadA.Val - Val) == 1)
-            Load = &LoadA;
+            Load = &LoadA; // LDA # -> INA/DEA
         break;
       case MOS::X:
         if (LoadX.MI && std::abs(LoadX.Val - Val) == 1)
-          Load = &LoadX;
+          Load = &LoadX; // LDX # -> INX/DEX
         break;
       case MOS::Y:
         if (LoadY.MI && std::abs(LoadY.Val - Val) == 1)
-          Load = &LoadY;
+          Load = &LoadY; // LDY # -> INY/DEY
         break;
       }
 
       if (Load) {
-        if (STI.hasGPRIncDec())
-          MI.setDesc(TII.get(Val > Load->Val ? MOS::IN_CMOS : MOS::DE_CMOS));
-        else
-          MI.setDesc(TII.get(Val > Load->Val ? MOS::IN : MOS::DE));
+        MI.setDesc(TII.get(Val > Load->Val ? MOS::INC : MOS::DEC));
         MI.getOperand(1).ChangeToRegister(Dst, /*isDef=*/false, /*isImp=*/false,
                                           /*isKill=*/true);
         MI.tieOperands(0, 1);
@@ -342,6 +369,7 @@ bool MOSLateOptimization::combineLdImm(MachineBasicBlock &MBB) const {
     }
 
     if (Load) {
+      // Replace LD_ # with T__, IN_ or DE_.
       Changed = true;
       Load->MI->getOperand(0).setIsDead(false);
       for (MachineInstr &J : make_range(MachineBasicBlock::iterator(Load->MI),
@@ -349,6 +377,7 @@ bool MOSLateOptimization::combineLdImm(MachineBasicBlock &MBB) const {
         J.clearRegisterKills(Load->MI->getOperand(0).getReg(), TRI);
     }
 
+    // Store this instruction (changed or not) and the new register value.
     switch (Dst) {
     case MOS::A:
       Load = &LoadA;

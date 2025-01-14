@@ -50,6 +50,8 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/RuntimeLibcalls.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -281,6 +283,8 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
 
   getActionDefinitionsBuilder({G_FCOPYSIGN, G_IS_FPCLASS}).lower();
 
+  getActionDefinitionsBuilder(G_FCANONICALIZE).custom();
+
   getActionDefinitionsBuilder(G_FPEXT).libcallFor({{S64, S32}});
   getActionDefinitionsBuilder(G_FPTRUNC).libcallFor({{S32, S64}});
 
@@ -332,6 +336,8 @@ MOSLegalizerInfo::MOSLegalizerInfo(const MOSSubtarget &STI) {
 
   getActionDefinitionsBuilder(G_JUMP_TABLE).unsupported();
 
+  getActionDefinitionsBuilder(G_TRAP).custom();
+
   // Variadic Arguments
 
   getActionDefinitionsBuilder({G_VASTART, G_VAARG}).custom();
@@ -356,16 +362,8 @@ bool MOSLegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
                                          MachineInstr &MI) const {
   LLT P = LLT::pointer(0, 16);
   MachineIRBuilder &Builder = Helper.MIRBuilder;
+  const MachineRegisterInfo &MRI = *Builder.getMRI();
   switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
-  case Intrinsic::trap: {
-    auto &Ctx = MI.getMF()->getFunction().getContext();
-    auto *RetTy = Type::getVoidTy(Ctx);
-    if (!createLibcall(Builder, "abort", {{}, RetTy, 0}, {}, CallingConv::C)) {
-      return false;
-    }
-    MI.eraseFromParent();
-    return true;
-  }
   case Intrinsic::vacopy: {
     MachinePointerInfo MPO;
     auto Tmp =
@@ -378,12 +376,45 @@ bool MOSLegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
     MI.eraseFromParent();
     return true;
   }
+  case Intrinsic::fptoui_sat: {
+    LLT Ty = MRI.getType(MI.getOperand(0).getReg());
+    auto ZeroConst = Builder.buildFConstant(Ty, 0);
+    auto MaxConst = Builder.buildFConstant(
+        Ty, APInt::getMaxValue(Ty.getSizeInBits()).roundToDouble());
+    Builder.buildFPTOUI(
+        Ty,
+        Builder.buildFMinNum(
+            MI.getOperand(0),
+            // This also projects NaN to 0.
+            Builder.buildFMaxNum(Ty, MI.getOperand(2), ZeroConst), MaxConst));
+    MI.eraseFromParent();
+    return true;
+  }
+  case Intrinsic::fptosi_sat: {
+    LLT Ty = MRI.getType(MI.getOperand(0).getReg());
+
+    auto IsNan =
+        Builder.buildIsFPClass(LLT::scalar(1), MI.getOperand(2), fcNan);
+    auto ZeroConst = Builder.buildConstant(Ty, 0);
+    auto MinConst = Builder.buildFConstant(
+        Ty, APInt::getSignedMinValue(Ty.getSizeInBits()).roundToDouble());
+    auto MaxConst = Builder.buildFConstant(
+        Ty, APInt::getSignedMaxValue(Ty.getSizeInBits()).roundToDouble());
+    Builder.buildSelect(
+        MI.getOperand(0), IsNan, ZeroConst,
+        Builder.buildFPTOUI(
+            Ty, Builder.buildFMinNum(
+                    Ty, Builder.buildFMaxNum(Ty, MI.getOperand(2), MinConst),
+                    MaxConst)));
+    MI.eraseFromParent();
+    return true;
+  }
   }
   return false;
 }
 
-bool MOSLegalizerInfo::legalizeCustom(LegalizerHelper &Helper,
-                                      MachineInstr &MI) const {
+bool MOSLegalizerInfo::legalizeCustom(LegalizerHelper &Helper, MachineInstr &MI,
+                                      LostDebugLocObserver &LocObserver) const {
   MachineRegisterInfo &MRI = MI.getMF()->getRegInfo();
 
   switch (MI.getOpcode()) {
@@ -397,9 +428,10 @@ bool MOSLegalizerInfo::legalizeCustom(LegalizerHelper &Helper,
   case G_ZEXT:
     return legalizeZExt(Helper, MRI, MI);
 
-  // Scalar Operations
   case G_BSWAP:
-    return legalizeBSwap(Helper, MRI, MI);
+  case G_FCANONICALIZE:
+  case G_FREEZE:
+    return legalizeToCopy(Helper, MRI, MI);
 
   // Integer Operations
   case G_ADD:
@@ -409,13 +441,13 @@ bool MOSLegalizerInfo::legalizeCustom(LegalizerHelper &Helper,
     return legalizeXor(Helper, MRI, MI);
   case G_SDIVREM:
   case G_UDIVREM:
-    return legalizeDivRem(Helper, MRI, MI);
+    return legalizeDivRem(Helper, MRI, MI, LocObserver);
   case G_LSHR:
   case G_SHL:
   case G_ASHR:
   case G_ROTL:
   case G_ROTR:
-    return legalizeShiftRotate(Helper, MRI, MI);
+    return legalizeShiftRotate(Helper, MRI, MI, LocObserver);
   case G_ICMP:
     return legalizeICmp(Helper, MRI, MI);
   case G_SELECT:
@@ -448,13 +480,15 @@ bool MOSLegalizerInfo::legalizeCustom(LegalizerHelper &Helper,
   case G_MEMCPY_INLINE:
   case G_MEMMOVE:
   case G_MEMSET:
-    return legalizeMemOp(Helper, MRI, MI);
+    return legalizeMemOp(Helper, MRI, MI, LocObserver);
 
   // Control Flow
   case G_BRCOND:
     return legalizeBrCond(Helper, MRI, MI);
   case G_BRJT:
     return legalizeBrJt(Helper, MRI, MI);
+  case G_TRAP:
+    return legalizeTrap(Helper, MRI, MI);
 
   // Variadic Arguments
   case G_VAARG:
@@ -466,15 +500,13 @@ bool MOSLegalizerInfo::legalizeCustom(LegalizerHelper &Helper,
   case G_FABS:
     return legalizeFAbs(Helper, MRI, MI);
   case G_FCMP:
-    return legalizeFCmp(Helper, MRI, MI);
+    return legalizeFCmp(Helper, MRI, MI, LocObserver);
   case G_FCONSTANT:
     return legalizeFConst(Helper, MRI, MI);
 
   // Other Operations
   case G_DYN_STACKALLOC:
     return legalizeDynStackAlloc(Helper, MRI, MI);
-  case G_FREEZE:
-    return legalizeFreeze(Helper, MRI, MI);
   }
 }
 
@@ -567,21 +599,6 @@ bool MOSLegalizerInfo::legalizeZExt(LegalizerHelper &Helper,
 }
 
 //===----------------------------------------------------------------------===//
-// Scalar Operations
-//===----------------------------------------------------------------------===//
-
-bool MOSLegalizerInfo::legalizeBSwap(LegalizerHelper &Helper,
-                                     MachineRegisterInfo &MRI,
-                                     MachineInstr &MI) const {
-  assert(MRI.getType(MI.getOperand(0).getReg()) == LLT::scalar(8));
-  assert(MRI.getType(MI.getOperand(1).getReg()) == LLT::scalar(8));
-  Helper.Observer.changingInstr(MI);
-  MI.setDesc(Helper.MIRBuilder.getTII().get(COPY));
-  Helper.Observer.changedInstr(MI);
-  return true;
-}
-
-//===----------------------------------------------------------------------===//
 // Integer Operations
 //===----------------------------------------------------------------------===//
 
@@ -634,11 +651,11 @@ bool MOSLegalizerInfo::legalizeXor(LegalizerHelper &Helper,
   Register Not;
   if (mi_match(Dst, MRI, m_Not(m_Reg(Not)))) {
     // The G_XOR may have been created by legalizing the definition of Dst.
-    // If so, since uses are legalized before defs, the legalization of the use
-    // of Dst has already occurred. Since the G_XOR didn't exist when the use
-    // was being legalized, there hasn't yet been any opportunity to fold the
-    // G_XOR in to the use. We do such folding here; hopefully that will make
-    // the G_XOR dead.
+    // If so, since uses are legalized before defs, the legalization of the
+    // use of Dst has already occurred. Since the G_XOR didn't exist when the
+    // use was being legalized, there hasn't yet been any opportunity to fold
+    // the G_XOR in to the use. We do such folding here; hopefully that will
+    // make the G_XOR dead.
 
     for (MachineInstr &UseMI : MRI.use_nodbg_instructions(Dst)) {
       if (UseMI.getOpcode() == MOS::G_BRCOND_IMM) {
@@ -693,7 +710,8 @@ bool MOSLegalizerInfo::legalizeXor(LegalizerHelper &Helper,
 
 bool MOSLegalizerInfo::legalizeDivRem(LegalizerHelper &Helper,
                                       MachineRegisterInfo &MRI,
-                                      MachineInstr &MI) const {
+                                      MachineInstr &MI,
+                                      LostDebugLocObserver &LocObserver) const {
   LLT Ty = MRI.getType(MI.getOperand(0).getReg());
   auto &Ctx = MI.getMF()->getFunction().getContext();
 
@@ -713,7 +731,7 @@ bool MOSLegalizerInfo::legalizeDivRem(LegalizerHelper &Helper,
   Args.push_back({FI->getOperand(0).getReg(), PtrTy, 2});
 
   if (!createLibcall(Helper.MIRBuilder, Libcall,
-                     {MI.getOperand(0).getReg(), HLTy, 0}, Args))
+                     {MI.getOperand(0).getReg(), HLTy, 0}, Args, LocObserver))
     return false;
 
   Helper.MIRBuilder.buildLoad(
@@ -735,14 +753,14 @@ static bool shouldOverCorrect(uint64_t Amt, LLT Ty, bool IsRotate) {
   if (IsRotate)
     return Amt > 4;
 
-  // The choice is between emitting Amt operations at width Ty, or emitting 8 -
-  // Amt operations (in the opposite direction) at width Ty + 8.
+  // The choice is between emitting Amt operations at width Ty, or emitting 8
+  // - Amt operations (in the opposite direction) at width Ty + 8.
   return Amt * Ty.getSizeInBytes() > (8 - Amt) * (Ty.getSizeInBytes() + 1);
 }
 
-bool MOSLegalizerInfo::legalizeShiftRotate(LegalizerHelper &Helper,
-                                           MachineRegisterInfo &MRI,
-                                           MachineInstr &MI) const {
+bool MOSLegalizerInfo::legalizeShiftRotate(
+    LegalizerHelper &Helper, MachineRegisterInfo &MRI, MachineInstr &MI,
+    LostDebugLocObserver &LocObserver) const {
   MachineIRBuilder &Builder = Helper.MIRBuilder;
 
   auto [Dst, Src, AmtReg] = MI.getFirst3Regs();
@@ -772,7 +790,7 @@ bool MOSLegalizerInfo::legalizeShiftRotate(LegalizerHelper &Helper,
     LLT AmtTy = MRI.getType(AmtReg);
     if (AmtTy != S8)
       MI.getOperand(2).setReg(Builder.buildTrunc(S8, AmtReg).getReg(0));
-    return shiftRotateLibcall(Helper, MRI, MI);
+    return shiftRotateLibcall(Helper, MRI, MI, LocObserver);
   }
 
   uint64_t Amt = ConstantAmt->Value.getZExtValue();
@@ -812,8 +830,8 @@ bool MOSLegalizerInfo::legalizeShiftRotate(LegalizerHelper &Helper,
       Fill = Builder.buildConstant(S8, 0).getReg(0);
       break;
     }
-    // Instead of decomposing the problem recursively byte-by-byte, looping here
-    // ensures that Fill is reused for G_ASHR.
+    // Instead of decomposing the problem recursively byte-by-byte, looping
+    // here ensures that Fill is reused for G_ASHR.
     while (Amt >= 8) {
       switch (MI.getOpcode()) {
       default:
@@ -1001,9 +1019,9 @@ bool MOSLegalizerInfo::legalizeLshrEShlE(LegalizerHelper &Helper,
   return true;
 }
 
-bool MOSLegalizerInfo::shiftRotateLibcall(LegalizerHelper &Helper,
-                                          MachineRegisterInfo &MRI,
-                                          MachineInstr &MI) const {
+bool MOSLegalizerInfo::shiftRotateLibcall(
+    LegalizerHelper &Helper, MachineRegisterInfo &MRI, MachineInstr &MI,
+    LostDebugLocObserver &LocObserver) const {
   unsigned Size = MRI.getType(MI.getOperand(0).getReg()).getSizeInBits();
   auto &Ctx = MI.getMF()->getFunction().getContext();
 
@@ -1016,7 +1034,7 @@ bool MOSLegalizerInfo::shiftRotateLibcall(LegalizerHelper &Helper,
   Args.push_back({MI.getOperand(1).getReg(), HLTy, 0});
   Args.push_back({MI.getOperand(2).getReg(), HLAmtTy, 1});
   if (!createLibcall(Helper.MIRBuilder, Libcall,
-                     {MI.getOperand(0).getReg(), HLTy, 0}, Args))
+                     {MI.getOperand(0).getReg(), HLTy, 0}, Args, LocObserver))
     return false;
 
   MI.eraseFromParent();
@@ -1173,8 +1191,8 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
 
   LLT Type = MRI.getType(LHS);
 
-  // Compare pointers by first converting to integer. This allows the comparison
-  // to be reduced to 8-bit comparisons.
+  // Compare pointers by first converting to integer. This allows the
+  // comparison to be reduced to 8-bit comparisons.
   if (Type.isPointer()) {
     LLT S = LLT::scalar(Type.getScalarSizeInBits());
 
@@ -1218,7 +1236,7 @@ bool MOSLegalizerInfo::legalizeICmp(LegalizerHelper &Helper,
                          : Builder.buildICmp(Pred, S1, LHSHigh, RHSHigh);
       auto RestPred = Pred;
       if (CmpInst::isSigned(RestPred))
-        RestPred = CmpInst::getUnsignedPredicate(Pred);
+        RestPred = ICmpInst::getUnsignedPredicate(Pred);
       auto CmpRest =
           Builder.buildICmp(RestPred, S1, LHSRest, RHSRest).getReg(0);
 
@@ -1724,8 +1742,8 @@ bool MOSLegalizerInfo::tryAbsoluteIndexedAddressing(LegalizerHelper &Helper,
     if (const MachineInstr *FIAddr = getOpcodeDef(G_FRAME_INDEX, Addr, MRI)) {
       const MachineOperand &FI = FIAddr->getOperand(1);
       if (willBeStaticallyAllocated(FI)) {
-        assert(
-            Index); // Otherwise, Absolute addressing would have been selected.
+        assert(Index); // Otherwise, Absolute addressing would have been
+                       // selected.
         auto Inst = Builder.buildInstr(Opcode)
                         .add(MI.getOperand(0))
                         .addFrameIndex(FI.getIndex(), FI.getOffset() + Offset)
@@ -1872,8 +1890,8 @@ bool MOSLegalizerInfo::selectIndirectAddressing(LegalizerHelper &Helper,
 }
 
 bool MOSLegalizerInfo::legalizeMemOp(LegalizerHelper &Helper,
-                                     MachineRegisterInfo &MRI,
-                                     MachineInstr &MI) const {
+                                     MachineRegisterInfo &MRI, MachineInstr &MI,
+                                     LostDebugLocObserver &LocObserver) const {
   MachineIRBuilder &Builder = Helper.MIRBuilder;
   const MOSSubtarget &STI = Builder.getMF().getSubtarget<MOSSubtarget>();
 
@@ -1917,7 +1935,6 @@ bool MOSLegalizerInfo::legalizeMemOp(LegalizerHelper &Helper,
   }
 
   // Try emitting a libcall.
-  LostDebugLocObserver LocObserver("");
   Result = createMemLibcall(Builder, MRI, MI, LocObserver);
   if (Result == LegalizerHelper::Legalized) {
     MI.eraseFromParent();
@@ -2201,6 +2218,18 @@ bool MOSLegalizerInfo::legalizeBrJt(LegalizerHelper &Helper,
   return true;
 }
 
+bool MOSLegalizerInfo::legalizeTrap(LegalizerHelper &Helper,
+                                    MachineRegisterInfo &MRI,
+                                    MachineInstr &MI) const {
+  auto *RetTy = Type::getVoidTy(MI.getMF()->getFunction().getContext());
+  LostDebugLocObserver LocObserver("");
+  if (!createLibcall(Helper.MIRBuilder, RTLIB::ABORT, {{}, RetTy, 0}, {},
+                     LocObserver))
+    return false;
+  MI.eraseFromParent();
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Variadic Arguments
 //===----------------------------------------------------------------------===//
@@ -2275,8 +2304,8 @@ bool MOSLegalizerInfo::legalizeFAbs(LegalizerHelper &Helper,
 
 // Legalize floating-point comparisons to libcalls.
 bool MOSLegalizerInfo::legalizeFCmp(LegalizerHelper &Helper,
-                                    MachineRegisterInfo &MRI,
-                                    MachineInstr &MI) const {
+                                    MachineRegisterInfo &MRI, MachineInstr &MI,
+                                    LostDebugLocObserver &LocObserver) const {
   assert(MRI.getType(MI.getOperand(2).getReg()) ==
              MRI.getType(MI.getOperand(3).getReg()) &&
          "Mismatched operands for G_FCMP");
@@ -2310,7 +2339,8 @@ bool MOSLegalizerInfo::legalizeFCmp(LegalizerHelper &Helper,
     auto Status =
         createLibcall(Builder, Libcall.LibcallID, {LibcallResult, RetTy, 0},
                       {{MI.getOperand(2).getReg(), ArgTy, 0},
-                       {MI.getOperand(3).getReg(), ArgTy, 0}});
+                       {MI.getOperand(3).getReg(), ArgTy, 0}},
+                      LocObserver);
 
     if (Status != LegalizerHelper::Legalized)
       return false;
@@ -2393,11 +2423,9 @@ bool MOSLegalizerInfo::legalizeDynStackAlloc(LegalizerHelper &Helper,
   return true;
 }
 
-bool MOSLegalizerInfo::legalizeFreeze(LegalizerHelper &Helper,
+bool MOSLegalizerInfo::legalizeToCopy(LegalizerHelper &Helper,
                                       MachineRegisterInfo &MRI,
                                       MachineInstr &MI) const {
-  // G_FREEZE is lowered to COPY here to ensure getDefSrcRegIgnoringCopies
-  // will work across the entire function during instruction selection.
   Helper.Observer.changingInstr(MI);
   MI.setDesc(Helper.MIRBuilder.getTII().get(COPY));
   Helper.Observer.changedInstr(MI);

@@ -5,12 +5,19 @@ on:
   push:
     ignore-forks: true
     branches: [main]
+    paths:
+      - 'clang/**'
+      - 'compiler-rt/**'
+      - 'lld/**'
+      - 'llvm/**'
+      - '.github/workflows/package.yml'
 jobs:
   package:
+    if: github.repository_owner == 'llvm-mos'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-2019, macos-latest, ubuntu-20.04]
+        os: [windows-2019, macos-13, ubuntu-20.04]
     steps:
       - name: Setup Windows
         if: startsWith(matrix.os, 'windows')

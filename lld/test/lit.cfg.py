@@ -40,6 +40,7 @@ llvm_config.use_lld()
 tool_patterns = [
     "llc",
     "llvm-as",
+    "llvm-cgdata",
     "llvm-mc",
     "llvm-nm",
     "llvm-objdump",
@@ -84,6 +85,7 @@ llvm_config.feature_config(
                 "PowerPC": "ppc",
                 "RISCV": "riscv",
                 "Sparc": "sparc",
+                "SystemZ": "systemz",
                 "WebAssembly": "wasm",
                 "X86": "x86",
             },

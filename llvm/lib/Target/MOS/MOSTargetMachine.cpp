@@ -12,6 +12,7 @@
 
 #include "MOSTargetMachine.h"
 
+#include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
 #include "llvm/CodeGen/GlobalISel/CSEInfo.h"
 #include "llvm/CodeGen/GlobalISel/IRTranslator.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
@@ -38,6 +39,7 @@
 #include "MOSIncDecPhi.h"
 #include "MOSIndexIV.h"
 #include "MOSInsertCopies.h"
+#include "MOSInternalize.h"
 #include "MOSLateOptimization.h"
 #include "MOSLowerSelect.h"
 #include "MOSMachineFunctionInfo.h"
@@ -62,6 +64,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeMOSTarget() {
   initializeMOSCopyOptPass(PR);
   initializeMOSIncDecPhiPass(PR);
   initializeMOSInsertCopiesPass(PR);
+  initializeMOSInternalizePass(PR);
   initializeMOSLateOptimizationPass(PR);
   initializeMOSLowerSelectPass(PR);
   initializeMOSNonReentrantPass(PR);
@@ -89,9 +92,9 @@ MOSTargetMachine::MOSTargetMachine(const Target &T, const Triple &TT,
                                    std::optional<Reloc::Model> RM,
                                    std::optional<CodeModel::Model> CM,
                                    CodeGenOptLevel OL, bool JIT)
-    : LLVMTargetMachine(T, MOSDataLayout, TT, getCPU(CPU), FS, Options,
-                        getEffectiveRelocModel(RM),
-                        getEffectiveCodeModel(CM, CodeModel::Small), OL),
+    : CodeGenTargetMachineImpl(T, MOSDataLayout, TT, getCPU(CPU), FS, Options,
+                               getEffectiveRelocModel(RM),
+                               getEffectiveCodeModel(CM, CodeModel::Small), OL),
       SubTarget(TT, getCPU(CPU).str(), FS.str(), *this) {
   this->TLOF = std::make_unique<MOSTargetObjectFile>();
 
@@ -249,6 +252,7 @@ void MOSPassConfig::addPreLegalizeMachineIR() {
 
 bool MOSPassConfig::addLegalizeMachineIR() {
   addPass(new Legalizer());
+  addPass(createMOSInternalizePass());
   return false;
 }
 

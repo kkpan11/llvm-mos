@@ -32,7 +32,7 @@
 using namespace llvm;
 
 AsmLexer::AsmLexer(const MCAsmInfo &MAI) : MAI(MAI) {
-  AllowAtInIdentifier = !StringRef(MAI.getCommentString()).startswith("@");
+  AllowAtInIdentifier = !StringRef(MAI.getCommentString()).starts_with("@");
   LexMotorolaIntegers = MAI.shouldUseMotorolaIntegers();
 }
 
@@ -614,7 +614,7 @@ AsmToken AsmLexer::LexSingleQuote() {
   StringRef Res = StringRef(TokStart,CurPtr - TokStart);
   long long Value;
 
-  if (Res.startswith("\'\\")) {
+  if (Res.starts_with("\'\\")) {
     char theChar = Res[2];
     switch (theChar) {
       default: Value = theChar; break;
@@ -655,7 +655,6 @@ AsmToken AsmLexer::LexQuote() {
     return AsmToken(AsmToken::String, StringRef(TokStart, CurPtr - TokStart));
   }
 
-  // TODO: does gas allow multiline string constants?
   while (CurChar != '"') {
     if (CurChar == '\\') {
       // Allow \", etc.
@@ -717,7 +716,7 @@ size_t AsmLexer::peekTokens(MutableArrayRef<AsmToken> Buf,
 }
 
 bool AsmLexer::isAtStartOfComment(const char *Ptr) {
-  if (MAI.getRestrictCommentStringToStartOfStatement() && !IsAtStartOfStatement)
+  if (MAI.isHLASM() && !IsAtStartOfStatement)
     return false;
 
   StringRef CommentString = MAI.getCommentString();
@@ -846,7 +845,7 @@ AsmToken AsmLexer::LexToken() {
       return LexIdentifier();
     return AsmToken(AsmToken::At, StringRef(TokStart, 1));
   case '#':
-    if (MAI.doesAllowHashAtStartOfIdentifier())
+    if (MAI.isHLASM())
       return LexIdentifier();
     return AsmToken(AsmToken::Hash, StringRef(TokStart, 1));
   case '?':

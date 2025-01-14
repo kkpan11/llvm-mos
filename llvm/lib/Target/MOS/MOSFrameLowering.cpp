@@ -14,6 +14,7 @@
 
 #include "MCTargetDesc/MOSMCTargetDesc.h"
 #include "MOS.h"
+#include "MOSInstrBuilder.h"
 #include "MOSMachineFunctionInfo.h"
 #include "MOSRegisterInfo.h"
 #include "MOSSubtarget.h"
@@ -118,8 +119,7 @@ bool MOSFrameLowering::spillCalleeSavedRegisters(
       continue;
     if (!StackRegClass.contains(Reg))
       Reg = Builder.buildCopy(&StackRegClass, Reg).getReg(0);
-    Builder.buildInstr(STI.hasGPRStackRegs() ? MOS::PH_CMOS : MOS::PH, {},
-                       {Reg});
+    Builder.buildInstr(MOS::PH, {}, {Reg});
   }
 
   // Record that the frame pointer is killed by these instructions.
@@ -192,8 +192,7 @@ bool MOSFrameLowering::restoreCalleeSavedRegisters(
       continue;
     if (!StackRegClass.contains(Reg))
       Reg = Builder.getMRI()->createVirtualRegister(&StackRegClass);
-    Builder.buildInstr(STI.hasGPRStackRegs() ? MOS::PL_CMOS : MOS::PL, {Reg},
-                       {});
+    Builder.buildInstr(MOS::PL, {Reg}, {});
     if (Reg != CI.getReg())
       Builder.buildCopy(CI.getReg(), Reg);
   }
@@ -366,17 +365,17 @@ void MOSFrameLowering::emitEpilogue(MachineFunction &MF,
     offsetSP(Builder, StackSize);
 }
 
-bool MOSFrameLowering::hasFP(const MachineFunction &MF) const {
-  const MachineFrameInfo &MFI = MF.getFrameInfo();
-  return MFI.isFrameAddressTaken() || MFI.hasVarSizedObjects();
-}
-
 uint64_t MOSFrameLowering::staticSize(const MachineFrameInfo &MFI) const {
   uint64_t Size = 0;
   for (int Idx : seq(0, MFI.getObjectIndexEnd()))
     if (MFI.getStackID(Idx) == TargetStackID::MosStatic)
       Size += MFI.getObjectSize(Idx);
   return Size;
+}
+
+bool MOSFrameLowering::hasFPImpl(const MachineFunction &MF) const {
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  return MFI.isFrameAddressTaken() || MFI.hasVarSizedObjects();
 }
 
 void MOSFrameLowering::offsetSP(MachineIRBuilder &Builder,
